@@ -1,0 +1,19 @@
+[package]
+name = "savestudio"
+version = "0.1.0"
+edition = "2021"
+description = "Éditeur de sauvegardes multi-jeux (Stardew, Celeste, Hollow Knight, Geometry Dash, Minecraft)"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "x11", "wayland"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+aes = "0.8"
+base64 = "0.22"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
