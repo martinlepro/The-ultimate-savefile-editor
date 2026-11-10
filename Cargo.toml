@@ -1,0 +1,27 @@
+[package]
+name = "savestudio"
+version = "0.3.0"
+edition = "2021"
+description = "SaveStudio : interface d'édition de sauvegardes (les éditeurs de jeux sont téléchargés depuis le dépôt The-ultimate-savefile-editor-games)"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "x11", "wayland"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+aes = "0.8"
+base64 = "0.22"
+flate2 = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+
+# certificats du système (antivirus / proxy d'entreprise qui inspectent le HTTPS) : pas sur Android
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rustls-native-certs = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
