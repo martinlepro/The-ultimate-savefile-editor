@@ -1,6 +1,5 @@
-//! Modèle commun : chaque format de sauvegarde expose le même petit contrat.
-//! Un chemin est une suite d'étapes séparées par `/` :
-//!   `nom`  `nom[2]`  `nom[*]` (joker)  `a?b` (alternatives)  `~clé` (plist : valeur après <k>clé</k>)  `@attr`
+//! Valeurs et interface d'un document de sauvegarde. La lecture/écriture des formats (xml, gd, hk, nbt) n'est pas ici :
+//! elle vient du pack de jeux (`wasm/savecodecs.wasm`), exécuté par `plugin.rs`.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scalar {
@@ -47,62 +46,4 @@ pub trait Doc {
     /// Remplace le premier joker du chemin par chaque index/clé existant.
     fn expand(&self, path: &str) -> Vec<String>;
     fn encode(&self) -> Result<Vec<u8>, String>;
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Idx {
-    None,
-    N(usize),
-    All,
-}
-
-pub struct Step<'a> {
-    pub alts: Vec<&'a str>,
-    pub key: bool,
-    pub idx: Idx,
-}
-
-pub fn parse_step(s: &str) -> Step<'_> {
-    let (s, key) = match s.strip_prefix('~') {
-        Some(r) => (r, true),
-        None => (s, false),
-    };
-    let mut name = s;
-    let mut idx = Idx::None;
-    if s.ends_with(']') {
-        if let Some(p) = s.rfind('[') {
-            let inside = &s[p + 1..s.len() - 1];
-            if inside == "*" {
-                idx = Idx::All;
-                name = &s[..p];
-            } else if let Ok(n) = inside.parse() {
-                idx = Idx::N(n);
-                name = &s[..p];
-            }
-        }
-    }
-    if name == "*" && idx == Idx::None {
-        idx = Idx::All;
-    }
-    Step { alts: name.split('?').collect(), key, idx }
-}
-
-pub fn first_wildcard(path: &str) -> Option<usize> {
-    path.split('/').position(|s| parse_step(s).idx == Idx::All)
-}
-
-#[allow(dead_code)]
-pub fn scalar_to_i64(v: &Scalar) -> Option<i64> {
-    v.num().map(|f| f.round() as i64)
-}
-
-/// Charge un fichier selon le codec déclaré par le jeu.
-pub fn open(codec: &str, bytes: &[u8]) -> Result<Box<dyn Doc>, String> {
-    match codec {
-        "xml" => Ok(Box::new(crate::xml::XmlDoc::parse(bytes.to_vec(), crate::xml::Wrap::Plain)?)),
-        "gd" => Ok(Box::new(crate::gd::open(bytes)?)),
-        "hk" => Ok(Box::new(crate::hk::HkDoc::open(bytes)?)),
-        "nbt" => Ok(Box::new(crate::nbt::NbtDoc::open(bytes)?)),
-        c => Err(format!("codec inconnu : {c}")),
-    }
 }

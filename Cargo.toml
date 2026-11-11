@@ -1,16 +1,15 @@
 [package]
 name = "savestudio"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "SaveStudio : interface d'édition de sauvegardes (les éditeurs de jeux sont téléchargés depuis le dépôt The-ultimate-savefile-editor-games)"
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "x11", "wayland"] }
-serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
-aes = "0.8"
-base64 = "0.22"
-flate2 = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+wasmi = "0.51"
+getrandom = "0.2"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"

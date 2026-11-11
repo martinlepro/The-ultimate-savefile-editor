@@ -61,6 +61,14 @@ pub struct Settings {
     pub density: Density,
     /// 0 = selon la carte, sinon 1 à 3 colonnes partout
     pub cols: u8,
+    // partage de sauvegardes via Tailscale (voir sync.rs)
+    pub sync_enabled: bool,
+    pub sync_allow_write: bool,
+    pub sync_token: String,
+    pub sync_port: u16,
+    /// adresse Tailscale de cet ordinateur si elle n'est pas détectée (Android, pas de ligne de commande)
+    pub sync_ip: String,
+    pub sync_peer: String,
 }
 
 impl Default for Settings {
@@ -84,6 +92,12 @@ impl Default for Settings {
             actions: ActPos::Bottom,
             density: Density::Normal,
             cols: 0,
+            sync_enabled: false,
+            sync_allow_write: false,
+            sync_token: String::new(),
+            sync_port: crate::sync::DEFAULT_PORT,
+            sync_ip: String::new(),
+            sync_peer: String::new(),
         }
     }
 }
@@ -142,6 +156,12 @@ impl Settings {
                 _ => Density::Normal,
             },
             cols: u("cols", 0, 3),
+            sync_enabled: b("sync_enabled", false),
+            sync_allow_write: b("sync_allow_write", false),
+            sync_token: s("sync_token", ""),
+            sync_port: (v.get("sync_port").and_then(|x| x.as_u64()).unwrap_or(crate::sync::DEFAULT_PORT as u64) as u16).max(1024),
+            sync_ip: s("sync_ip", ""),
+            sync_peer: s("sync_peer", ""),
         }
     }
 
@@ -157,6 +177,8 @@ impl Settings {
             "actions": match self.actions { ActPos::Bottom => "bottom", ActPos::Top => "top" },
             "density": match self.density { Density::Compact => "compact", Density::Normal => "normal", Density::Roomy => "roomy" },
             "cols": self.cols,
+            "sync_enabled": self.sync_enabled, "sync_allow_write": self.sync_allow_write, "sync_token": self.sync_token,
+            "sync_port": self.sync_port, "sync_ip": self.sync_ip, "sync_peer": self.sync_peer,
         })
     }
 

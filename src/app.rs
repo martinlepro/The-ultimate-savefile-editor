@@ -1,7 +1,9 @@
 use crate::def::{self, Cat, Field, Game, Kind};
 use crate::detect::{self, Found};
-use crate::doc::{self, Doc, Scalar};
+use crate::doc::{Doc, Scalar};
 use crate::fonts;
+use crate::fsutil::{latest_backup, write_safely};
+use crate::plugin::{self, Plugin};
 use crate::gfx::*;
 use crate::pack::{self, FontSpec, Pack};
 use crate::settings::{self, ActPos, Density, Settings, SysFont, TabsPos};
@@ -10,9 +12,14 @@ use crate::updater::{self, Msg, Remote};
 use crate::Launch;
 use eframe::egui::*;
 use std::cmp::Ordering;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
+
+mod sync_ui;
+use sync_ui::SyncUi;
 
 const VERSION: &str = pack::APP_VERSION;
 
@@ -80,6 +87,7 @@ enum Screen {
     Saves(usize),
     Editor,
     Settings,
+    Sync,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,6 +98,7 @@ enum Act {
     Save,
     Home,
     Settings,
+    Sync,
 }
 
 /// État de la mise à jour des éditeurs de jeux.
@@ -112,6 +121,8 @@ pub struct App {
     pack_version: Option<String>,
     pack_updated: String,
     local_pack: Option<PathBuf>,
+    /// code du pack qui comprend les sauvegardes (WebAssembly)
+    codecs: Option<Rc<RefCell<Plugin>>>,
     sys_fonts: Vec<SysFont>,
     defined_fonts: Vec<String>,
     /// polices installées pendant cette image : egui ne les connaît qu'à l'image suivante
@@ -134,6 +145,7 @@ pub struct App {
     open_arg: Option<(PathBuf, usize)>,
     upd: Upd,
     manual_check: bool,
+    sync: SyncUi,
 }
 
 fn rd(env_doc: &dyn Doc, st: &Settings, p: &str) -> Option<Scalar> {
@@ -285,36 +297,6 @@ fn human_size(n: u64) -> String {
     if n >= 1 << 20 { format!("{:.1} MB", n as f64 / (1 << 20) as f64) } else if n >= 1024 { format!("{:.0} KB", n as f64 / 1024.0) } else { format!("{n} B") }
 }
 
-fn backup_dir(path: &Path) -> PathBuf {
-    path.parent().unwrap_or(Path::new(".")).join("savestudio-backups")
-}
-
-/// Copie de sécurité (si demandée) puis écriture atomique (fichier temporaire + renommage).
-fn write_safely(path: &Path, bytes: &[u8], backup: bool) -> Result<(), String> {
-    if backup && path.exists() {
-        let dir = backup_dir(path);
-        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(path, dir.join(format!("{name}.{stamp}.bak"))).map(|_| ())).map_err(|e| format!("Backup failed, nothing written: {e}"))?;
-    }
-    let tmp = path.with_extension("savestudio-tmp");
-    std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("Write failed: {e}"))
-}
-
-fn latest_backup(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    let mut best: Option<(u64, PathBuf)> = None;
-    for e in std::fs::read_dir(backup_dir(path)).ok()?.flatten() {
-        let f = e.file_name().to_string_lossy().into_owned();
-        if let Some(ts) = f.strip_prefix(&format!("{name}.")).and_then(|r| r.strip_suffix(".bak")).and_then(|t| t.parse::<u64>().ok()) {
-            if best.as_ref().map_or(true, |(b, _)| ts > *b) {
-                best = Some((ts, e.path()));
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
 impl App {
     pub fn new(cc: &eframe::CreationContext, launch: Launch) -> App {
         let st = Settings::load();
@@ -327,6 +309,7 @@ impl App {
             pack_version: None,
             pack_updated: String::new(),
             local_pack: launch.pack.clone(),
+            codecs: None,
             sys_fonts: settings::system_fonts(),
             defined_fonts: vec!["pixelify".into()],
             fonts_pending: None,
@@ -348,6 +331,7 @@ impl App {
             open_arg: launch.open.map(|p| (p, launch.page)),
             upd: Upd::Idle,
             manual_check: false,
+            sync: SyncUi::default(),
         };
         app.sync_fonts(&cc.egui_ctx);
         match launch.pack {
@@ -377,6 +361,13 @@ impl App {
 
     // ------------------------------------------------------------------ pack et mises à jour
 
+    fn open_doc(&self, codec: &str, bytes: &[u8]) -> Result<Box<dyn Doc>, String> {
+        match &self.codecs {
+            Some(p) => plugin::open(p, codec, bytes),
+            None => Err("The game pack has no save codecs - update the game editors".into()),
+        }
+    }
+
     fn theme_named(&self, n: &str) -> Theme {
         self.pack_themes.iter().find(|(k, _)| k == n).map(|(_, t)| t.clone()).unwrap_or_else(|| Theme::builtin(if n == "home" { "home" } else { "wood" }))
     }
@@ -388,6 +379,13 @@ impl App {
         self.pack_themes = p.themes;
         self.pack_fonts = p.fonts;
         self.pack_icons = p.icons;
+        self.codecs = None;
+        if let Some(f) = &p.codecs {
+            match std::fs::read(f).map_err(|e| format!("codecs : {e}")).and_then(|b| Plugin::load(&b)) {
+                Ok(pl) => self.codecs = Some(Rc::new(RefCell::new(pl))),
+                Err(e) => self.say(e, false),
+            }
+        }
         self.games = p.games;
         self.themes = self.games.iter().map(|g| self.theme_named(&g.theme)).collect();
         self.scans = self.games.iter().map(|g| detect::scan(&g.patterns)).collect();
@@ -514,7 +512,7 @@ impl App {
     }
 
     fn modal_open(&self) -> bool {
-        self.pending.is_some() || !matches!(self.upd, Upd::Idle | Upd::Checking(_))
+        self.pending.is_some() || self.sync.confirm_open() || !matches!(self.upd, Upd::Idle | Upd::Checking(_))
     }
 
     // ------------------------------------------------------------------ polices, thèmes, réglages
@@ -568,7 +566,7 @@ impl App {
     fn load(&mut self, game: usize, path: &Path) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("lecture impossible : {e}"))?;
         let g = &self.games[game];
-        let doc = doc::open(&g.codec, &bytes).map_err(|e| format!("Not a readable {} save ({e})", g.name))?;
+        let doc = self.open_doc(&g.codec, &bytes).map_err(|e| format!("Not a readable {} save ({e})", g.name))?;
         if !matches_game(&*doc, g) {
             return Err(format!("This file does not look like a {} save", g.name));
         }
@@ -576,7 +574,7 @@ impl App {
         let mirror = g.mirror.as_ref().and_then(|m| {
             let p = path.parent()?.join(&m.file);
             let b = std::fs::read(&p).ok()?;
-            doc::open(&g.codec, &b).ok().map(|d| (p, d))
+            self.open_doc(&g.codec, &b).ok().map(|d| (p, d))
         });
         self.sess = Some(Session { game, path: path.to_path_buf(), doc, dirty: false, cat: 0, mirror, hist: History::default() });
         self.screen = Screen::Editor;
@@ -589,7 +587,7 @@ impl App {
             Err(e) => return self.say(format!("Cannot read {} : {e}", path.display()), false),
         };
         for (i, g) in self.games.iter().enumerate() {
-            if let Ok(d) = doc::open(&g.codec, &bytes) {
+            if let Ok(d) = self.open_doc(&g.codec, &bytes) {
                 if matches_game(&*d, g) {
                     return match self.load(i, path) {
                         Ok(()) => self.say(format!("Loaded {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), true),
@@ -721,6 +719,12 @@ impl App {
                 self.sess = None;
                 self.screen = Screen::Home;
             }
+            Act::Sync => {
+                if self.screen != Screen::Sync {
+                    self.settings_from = self.screen;
+                }
+                self.screen = Screen::Sync;
+            }
             Act::Settings => {
                 if self.screen != Screen::Settings {
                     self.settings_from = self.screen;
@@ -740,6 +744,7 @@ impl App {
                     _ => Screen::Home,
                 }
             }
+            Screen::Sync => self.screen = Screen::Home,
             Screen::Saves(_) => self.screen = if self.sess.is_some() { Screen::Editor } else { Screen::Home },
             Screen::Editor => {
                 if self.sess.as_ref().map_or(false, |s| s.dirty) {
@@ -793,13 +798,14 @@ impl App {
         let mut rescan = false;
         let mut manual_open = false;
         let mut to_settings = false;
+        let mut to_sync = false;
         let mut check = false;
         let q = self.search.trim().to_lowercase();
         let shown: Vec<usize> = (0..self.games.len()).filter(|&i| q.is_empty() || self.games[i].name.to_lowercase().contains(&q) || self.games[i].id.contains(&q) || self.games[i].short.to_lowercase().contains(&q)).collect();
         let card_fonts: Vec<String> = self.games.iter().map(|g| self.font_key(&g.font)).collect();
         let status = match (&self.upd, &self.pack_version) {
             (Upd::Checking(_), _) => "checking for game editor updates...".to_string(),
-            (_, Some(v)) => format!("Game editors v{v}"),
+            (_, Some(v)) => format!("Game editors v{v}{}", if self.sync.running() { "  -  sharing saves over Tailscale" } else { "" }),
             (_, None) => "Game editors: not installed".to_string(),
         };
         let none_yet = self.games.is_empty();
@@ -876,7 +882,7 @@ impl App {
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let te = TextEdit::singleline(&mut self.manual).hint_text(RichText::new("...or paste the path of a save file").color(th.ink_soft)).font(g.body(18.0)).text_color(th.input_ink).desired_width((w - 410.0).max(120.0)).margin(Margin::symmetric(10, 8));
+                    let te = TextEdit::singleline(&mut self.manual).hint_text(RichText::new("...or paste the path of a save file").color(th.ink_soft)).font(g.body(18.0)).text_color(th.input_ink).desired_width((w - 505.0).max(120.0)).margin(Margin::symmetric(10, 8));
                     if ui.add(te).lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         manual_open = true;
                     }
@@ -885,6 +891,9 @@ impl App {
                     }
                     if button(ui, &g, vec2(100.0, 36.0), "RESCAN", th.btn[1], th.btn_ink, None).clicked() {
                         rescan = true;
+                    }
+                    if button(ui, &g, vec2(90.0, 36.0), "SYNC", th.btn[3], hex(0x2a1a06), None).clicked() {
+                        to_sync = true;
                     }
                     if button(ui, &g, vec2(130.0, 36.0), "SETTINGS", th.btn[0], th.btn_ink, None).clicked() {
                         to_settings = true;
@@ -905,6 +914,9 @@ impl App {
         }
         if to_settings {
             self.act(Act::Settings);
+        }
+        if to_sync {
+            self.act(Act::Sync);
         }
         if manual_open && !self.manual.trim().is_empty() {
             let p = PathBuf::from(self.manual.trim().trim_matches('"'));
@@ -1274,6 +1286,10 @@ impl App {
         };
         let folder = if let Some(p) = &self.local_pack { format!("Local pack: {}", p.display()) } else { format!("Folder: {}", pack::pack_dir().display()) };
         let checking = matches!(self.upd, Upd::Checking(_));
+        let codec_line = match &self.codecs {
+            Some(c) => format!("Save formats understood: {}", c.borrow().codecs().join(", ")),
+            None => "Save formats: none (the game pack has no codecs)".to_string(),
+        };
         {
             let App { st, icons, pack_fonts, sys_fonts, font_filter, defined_fonts, .. } = self;
             let g = Gfx { th: &th, icons, font: &font };
@@ -1344,6 +1360,7 @@ impl App {
 
                         section(ui, &g, "Game editors", |ui| {
                             ui.label(RichText::new(&pack_line).font(g.body(19.0)).color(th.ink));
+                            ui.label(RichText::new(&codec_line).font(g.body(15.0)).color(th.ink_soft));
                             ui.label(RichText::new(&folder).font(g.body(14.0)).color(th.ink_soft));
                             ui.horizontal(|ui| {
                                 label(ui, &g, "Check at startup", lw);
@@ -1369,7 +1386,9 @@ impl App {
             });
         }
         if reset {
+            let keep = (self.st.sync_enabled, self.st.sync_allow_write, self.st.sync_token.clone(), self.st.sync_port, self.st.sync_ip.clone(), self.st.sync_peer.clone());
             self.st = Settings::default();
+            (self.st.sync_enabled, self.st.sync_allow_write, self.st.sync_token, self.st.sync_port, self.st.sync_ip, self.st.sync_peer) = keep;
             self.styled.clear();
             self.say("Settings reset to defaults", true);
         }
@@ -1801,6 +1820,7 @@ impl App {
         self.sync_fonts(ctx);
         self.fonts_live = true;
         self.poll_update(ctx);
+        self.sync_tick(ctx);
         let modal = self.modal_open();
 
         // glisser-déposer d'un fichier de sauvegarde
@@ -1827,6 +1847,7 @@ impl App {
             Screen::Saves(g) if g < self.games.len() => self.saves_ui(ctx, g),
             Screen::Saves(_) => self.screen = Screen::Home,
             Screen::Settings => self.settings_ui(ctx),
+            Screen::Sync => self.sync_ui(ctx),
             Screen::Editor => {
                 if self.sess.is_none() {
                     self.screen = Screen::Home;

@@ -108,6 +108,8 @@ pub struct FontSpec {
 }
 
 pub struct Pack {
+    /// module WebAssembly qui comprend les sauvegardes
+    pub codecs: Option<PathBuf>,
     pub version: String,
     pub updated: String,
     pub games: Vec<Game>,
@@ -165,6 +167,17 @@ pub fn load(dir: &Path) -> Result<Pack, String> {
         None => None,
     };
 
+    let codecs = match v.get("codecs") {
+        Some(c) => {
+            let rel = c.get("file").and_then(|x| x.as_str()).ok_or("manifest : codecs sans « file »")?;
+            if !safe_rel(rel) {
+                return Err(format!("chemin refusé : {rel}"));
+            }
+            Some(dir.join(rel))
+        }
+        None => None,
+    };
+
     let mut fonts = vec![];
     if let Some(o) = v.get("fonts").and_then(|x| x.as_object()) {
         for (name, f) in o {
@@ -199,7 +212,7 @@ pub fn load(dir: &Path) -> Result<Pack, String> {
             }
         }
     }
-    Ok(Pack { version: man.version, updated: man.updated, games, fonts, themes, icons })
+    Ok(Pack { codecs, version: man.version, updated: man.updated, games, fonts, themes, icons })
 }
 
 #[cfg(test)]

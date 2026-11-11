@@ -6,15 +6,15 @@ mod def;
 mod detect;
 mod doc;
 mod fonts;
-mod gd;
+mod fsutil;
 mod gfx;
-mod hk;
-mod nbt;
 mod pack;
+mod plugin;
 mod settings;
+mod sync;
+mod tailscale;
 mod theme;
 mod updater;
-mod xml;
 
 use std::path::PathBuf;
 
